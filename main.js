@@ -19,7 +19,7 @@ const bot = new Telegraf(BOT_TOKEN);
 const COIN_MAP = {
   sol: "solana",
   usdt: "tether",
-  usd: "tether",      // treat usd like usdt
+  usd: "tether", // treat usd like usdt
   bnb: "binancecoin",
   btc: "bitcoin",
   eth: "ethereum",
@@ -56,11 +56,12 @@ async function getPrices(force = false) {
     throw new Error("Missing tether price data from CoinGecko");
   }
 
+  // tỷ giá VND / 1 USD (dựa trên USDT)
   const fxVndPerUsd = data.tether.vnd / data.tether.usd;
 
   lastPrices = {
-    raw: data,        // full data by id
-    fxVndPerUsd,      // global FX: VND per 1 USD
+    raw: data, // full data by id
+    fxVndPerUsd, // global FX: VND per 1 USD
   };
 
   lastFetchTs = now;
@@ -69,10 +70,34 @@ async function getPrices(force = false) {
 
 // ================== UTILS ==================
 
-// convert text như: 100k -> 100000; 2m -> 2000000; 1b -> 1,000,000,000; 1 tỷ -> 1,000,000,000
+// convert text như:
+// 100k  -> 100,000
+// 2m    -> 2,000,000
+// 1b    -> 1,000,000,000
+// 1m2   -> 1,200,000
+// 1b2   -> 1,200,000,000
+// 10k5  -> 10,500
 function parseVND(str) {
-  const s = str.toLowerCase();
-  let num = parseFloat(s.replace(/[^0-9.]/g, ""));
+  let s = str.toLowerCase().trim();
+
+  // pattern đặc biệt: <int><k|m|b><digit>, ví dụ: 1b2, 1m2, 10k5
+  const compactMatch = s.match(/^(\d+)([kmb])(\d)$/);
+  if (compactMatch) {
+    const base = parseInt(compactMatch[1], 10);
+    const suffix = compactMatch[2];
+    const extraDigit = parseInt(compactMatch[3], 10);
+
+    let factor = 1;
+    if (suffix === "k") factor = 1_000;
+    if (suffix === "m") factor = 1_000_000;
+    if (suffix === "b") factor = 1_000_000_000;
+
+    return (base + extraDigit / 10) * factor; // ví dụ 1b2 => (1 + 0.2) * 1e9
+  }
+
+  // fallback: logic cũ
+  const numeric = s.replace(/[^0-9.]/g, "");
+  let num = parseFloat(numeric);
   if (isNaN(num)) return NaN;
 
   if (s.includes("k")) num *= 1_000;
@@ -103,6 +128,26 @@ function getUsdValueFromCoin(amount, symbol, prices) {
   return amount * coinData.usd;
 }
 
+// format SOL smart: lớn thì 1 số sau dấu chấm, nhỏ thì giữ chi tiết hơn
+function formatSolAmount(solAmount) {
+  if (solAmount >= 1) {
+    return solAmount.toFixed(1); // 357.9012 -> 357.9
+  } else if (solAmount >= 0.01) {
+    return solAmount.toFixed(3); // 0.123456 -> 0.123
+  } else {
+    return solAmount.toFixed(6); // rất nhỏ thì giữ 6 số
+  }
+}
+
+// format USDT: lớn thì rút gọn + thousands, nhỏ thì để 2 số sau dấu chấm
+function formatUsdtAmount(usdtAmount) {
+  if (usdtAmount >= 1000) {
+    return Math.round(usdtAmount).toLocaleString("vi-VN"); // 45490.73 -> "45.491"
+  } else {
+    return usdtAmount.toFixed(2); // 12.3456 -> "12.35"
+  }
+}
+
 // ================== CORE HANDLER ==================
 
 async function handleVal(ctx, rawInput) {
@@ -115,7 +160,7 @@ async function handleVal(ctx, rawInput) {
         "- `100 usdt`\n" +
         "- `500k vnd`\n" +
         "- `2m vnd`\n" +
-        "- `1b vnd`\n" +
+        "- `1b2 vnd`\n" +
         "- `0.01 btc`\n" +
         "- `0.5 eth`",
       { parse_mode: "Markdown" }
@@ -131,7 +176,7 @@ async function handleVal(ctx, rawInput) {
   const [amountStr, coin] = text.split(" ");
   if (!amountStr || !coin) {
     return ctx.reply(
-      "❌ Sai format. Ví dụ: `val 1 sol`, `100 usdt`, `2m vnd`, `1b vnd`, `0.01 btc`"
+      "❌ Sai format. Ví dụ: `val 1 sol`, `100 usdt`, `2m vnd`, `1b2 vnd`, `0.01 btc`"
     );
   }
 
@@ -145,7 +190,7 @@ async function handleVal(ctx, rawInput) {
     const vnd = parseVND(amountStr);
     if (!vnd || isNaN(vnd)) {
       return ctx.reply(
-        "❌ Amount VND không hợp lệ (ví dụ: `100k vnd`, `2m vnd`, `1b vnd`, `500000 vnd`)."
+        "❌ Amount VND không hợp lệ (ví dụ: `100k vnd`, `2m vnd`, `1b vnd`, `1b2 vnd`, `500000 vnd`)."
       );
     }
     usdValue = vnd / prices.fxVndPerUsd;
@@ -177,12 +222,15 @@ async function handleVal(ctx, rawInput) {
   const solAmount = usdValue / solPrice;
   const usdtAmount = usdValue; // 1 USDT ~ 1 USD
 
+  const solDisplay = formatSolAmount(solAmount);
+  const usdtDisplay = formatUsdtAmount(usdtAmount);
+
   return ctx.reply(
     `💰 *VALUE CHECK*\n\n` +
       `🇻🇳 VND: *${Math.round(vndValue).toLocaleString("vi-VN")}₫*\n` +
       `💲 USD: *${usdValue.toFixed(2)}$*\n\n` +
-      `🪙 SOL: *${solAmount.toFixed(4)} SOL*\n` +
-      `💵 USDT: *${usdtAmount.toFixed(2)} USDT*`,
+      `🪙 SOL: *${solDisplay} SOL*\n` +
+      `💵 USDT: *${usdtDisplay} USDT*`,
     { parse_mode: "Markdown" }
   );
 }
@@ -199,7 +247,7 @@ bot.start((ctx) => {
       "- `val 1 sol`\n" +
       "- `1 sol`\n" +
       "- `2m vnd`\n" +
-      "- `1b vnd`\n" +
+      "- `1b2 vnd`\n" +
       "- `100 usdt`\n" +
       "- `0.01 btc`\n" +
       "- `0.5 eth`",
@@ -237,11 +285,11 @@ bot.on("text", async (ctx) => {
   const lower = msg.toLowerCase();
 
   // match pattern "<amount> <coin>" hoặc "val <amount> <coin>"
-  // amount: số, số.k/m/b, có thể có thập phân
+  // amount: số, số.k/m/b, có thể có 1 số phía sau như 1b2, 1m2, 10k5
   const simplePattern =
-    /^(\d+(\.\d+)?(k|m|b)?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
+    /^(\d+(\.\d+)?(k|m|b)?\d?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
   const valPattern =
-    /^val\s+(\d+(\.\d+)?(k|m|b)?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
+    /^val\s+(\d+(\.\d+)?(k|m|b)?\d?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
 
   if (simplePattern.test(lower) || valPattern.test(lower)) {
     try {
