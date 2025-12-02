@@ -4,7 +4,7 @@ const { Telegraf } = require("telegraf");
 const axios = require("axios");
 
 // 👉 THAY TOKEN BOT CỦA BẠN VÀO ĐÂY
-const BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
+const BOT_TOKEN = "8421486324:AAFc0QpBWIuXvfVHfThZPIsE5d6rVq3a0j4";
 
 if (!BOT_TOKEN || BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") {
   console.error("❌ Chưa set BOT_TOKEN trong code!");
