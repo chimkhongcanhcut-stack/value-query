@@ -41,7 +41,7 @@ const COIN_IDS = Array.from(new Set(Object.values(COIN_MAP))).join(",");
 // ================== FX CONFIG (BINANCE) ==================
 // 👉 Tỉ giá chuẩn: 1 USDT ~ 27.500 VND (Binance bán ra)
 // Sau này Binance đổi, chỉ cần sửa con số này.
-const FX_VND_PER_USD = 27522;
+const FX_VND_PER_USD = 27500;
 
 // ================== PRICE API + CACHE ==================
 
@@ -72,8 +72,8 @@ async function getPrices(force = false) {
   const fxVndPerUsd = FX_VND_PER_USD;
 
   lastPrices = {
-    raw: data,      // full data by id (chỉ có usd)
-    fxVndPerUsd,   // VND per 1 USD (Binance)
+    raw: data, // full data by id (chỉ có usd)
+    fxVndPerUsd, // VND per 1 USD (Binance)
   };
 
   lastFetchTs = now;
@@ -196,7 +196,9 @@ function formatUsdtAmount(usdtAmount) {
 // ================== CORE HANDLER ==================
 
 async function handleVal(ctx, rawInput) {
-  const raw = rawInput.trim().toLowerCase();
+  const original = rawInput.trim();        // giữ nguyên để show header đẹp
+  const raw = original.toLowerCase();      // dùng cho parse
+
   if (!raw) {
     return ctx.reply(
       "📌 Format: `val <amount> <coin>` hoặc chỉ `<amount> <coin>`\n" +
@@ -236,6 +238,7 @@ async function handleVal(ctx, rawInput) {
 
   let usdValue;
   let vndValue;
+  let headerText = `${amountExpr} ${coin}`.trim();
 
   // Trường hợp input là VND (expression)
   if (coin === "vnd") {
@@ -277,12 +280,15 @@ async function handleVal(ctx, rawInput) {
   const solDisplay = formatSolAmount(solAmount);
   const usdtDisplay = formatUsdtAmount(usdtAmount);
 
+  // header kiểu: "1 SOL =" hoặc "100k+20k usdt ="
+  const headerLine = `${headerText.toUpperCase()} =`;
+
   return ctx.reply(
-    `💰 *VALUE CHECK*\n\n` +
+    `${headerLine}\n\n` +
       `🇻🇳 VND: *${Math.round(vndValue).toLocaleString("vi-VN")}₫*\n` +
       `💲 USD: *${usdValue.toFixed(2)}$*\n\n` +
-      `🪙 SOL: *${solDisplay} SOL*\n` +
-      `💵 USDT: *${usdtDisplay} USDT*`,
+      `🪙 SOL: *${solDisplay}*\n` +
+      `💵 USDT: *${usdtDisplay}*`,
     { parse_mode: "Markdown" }
   );
 }
