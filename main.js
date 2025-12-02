@@ -1,10 +1,10 @@
-// main.js - Telegram Crypto Value Bot (CommonJS, auto-parse, cache, anti-429)
+// main.js - Telegram Crypto Value Bot (CommonJS, auto-parse, cache, multi-coin, tỷ, no-BNB output)
 
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
 
 // 👉 THAY TOKEN BOT CỦA BẠN VÀO ĐÂY
-const BOT_TOKEN = "8421486324:AAFc0QpBWIuXvfVHfThZPIsE5d6rVq3a0j4";
+const BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN";
 
 if (!BOT_TOKEN || BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") {
   console.error("❌ Chưa set BOT_TOKEN trong code!");
@@ -13,10 +13,27 @@ if (!BOT_TOKEN || BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") {
 
 const bot = new Telegraf(BOT_TOKEN);
 
+// ================== COIN CONFIG ==================
+
+// map symbol -> CoinGecko id
+const COIN_MAP = {
+  sol: "solana",
+  usdt: "tether",
+  usd: "tether",      // treat usd like usdt
+  bnb: "binancecoin",
+  btc: "bitcoin",
+  eth: "ethereum",
+  ton: "toncoin",
+  avax: "avalanche-2",
+  doge: "dogecoin",
+};
+
+// build ids string for API
+const COIN_IDS = Array.from(new Set(Object.values(COIN_MAP))).join(",");
+
 // ================== PRICE API + CACHE ==================
 
-const API_URL =
-  "https://api.coingecko.com/api/v3/simple/price?ids=solana,binancecoin,tether&vs_currencies=usd,vnd";
+const API_URL = `https://api.coingecko.com/api/v3/simple/price?ids=${COIN_IDS}&vs_currencies=usd,vnd`;
 
 let lastPrices = null;
 let lastFetchTs = 0;
@@ -33,23 +50,57 @@ async function getPrices(force = false) {
   console.log("🌐 Fetching prices from CoinGecko...");
   const res = await axios.get(API_URL, { timeout: 5000 });
 
+  const data = res.data;
+
+  if (!data.tether || !data.tether.usd || !data.tether.vnd) {
+    throw new Error("Missing tether price data from CoinGecko");
+  }
+
+  const fxVndPerUsd = data.tether.vnd / data.tether.usd;
+
   lastPrices = {
-    sol: res.data.solana,
-    bnb: res.data.binancecoin,
-    usdt: res.data.tether,
+    raw: data,        // full data by id
+    fxVndPerUsd,      // global FX: VND per 1 USD
   };
+
   lastFetchTs = now;
   return lastPrices;
 }
 
 // ================== UTILS ==================
 
-// convert text như: 100k -> 100000; 2m -> 2000000
+// convert text như: 100k -> 100000; 2m -> 2000000; 1b -> 1,000,000,000; 1 tỷ -> 1,000,000,000
 function parseVND(str) {
-  let num = parseFloat(str.replace(/[^0-9.]/g, ""));
-  if (str.includes("k")) num *= 1000;
-  if (str.includes("m")) num *= 1000000;
+  const s = str.toLowerCase();
+  let num = parseFloat(s.replace(/[^0-9.]/g, ""));
+  if (isNaN(num)) return NaN;
+
+  if (s.includes("k")) num *= 1_000;
+  if (s.includes("m")) num *= 1_000_000;
+  if (s.includes("b") || s.includes("ty") || s.includes("tỷ")) num *= 1_000_000_000;
+
   return num;
+}
+
+// get USD value from input amount + coin
+function getUsdValueFromCoin(amount, symbol, prices) {
+  const sym = symbol.toLowerCase();
+
+  if (sym === "usd" || sym === "usdt") {
+    return amount; // 1 USDT ~ 1 USD
+  }
+
+  const id = COIN_MAP[sym];
+  if (!id) {
+    throw new Error(`Unsupported coin symbol: ${symbol}`);
+  }
+
+  const coinData = prices.raw[id];
+  if (!coinData || !coinData.usd) {
+    throw new Error(`Missing USD price for ${symbol}`);
+  }
+
+  return amount * coinData.usd;
 }
 
 // ================== CORE HANDLER ==================
@@ -63,7 +114,10 @@ async function handleVal(ctx, rawInput) {
         "- `val 1 sol`\n" +
         "- `100 usdt`\n" +
         "- `500k vnd`\n" +
-        "- `2m vnd`",
+        "- `2m vnd`\n" +
+        "- `1b vnd`\n" +
+        "- `0.01 btc`\n" +
+        "- `0.5 eth`",
       { parse_mode: "Markdown" }
     );
   }
@@ -76,61 +130,59 @@ async function handleVal(ctx, rawInput) {
 
   const [amountStr, coin] = text.split(" ");
   if (!amountStr || !coin) {
-    return ctx.reply("❌ Sai format. Ví dụ: `val 1 sol`, `100 usdt`, `2m vnd`");
+    return ctx.reply(
+      "❌ Sai format. Ví dụ: `val 1 sol`, `100 usdt`, `2m vnd`, `1b vnd`, `0.01 btc`"
+    );
   }
 
   const prices = await getPrices(); // dùng cache
 
-  let usdValue, vndValue;
+  let usdValue;
+  let vndValue;
 
+  // Trường hợp input là VND
   if (coin === "vnd") {
     const vnd = parseVND(amountStr);
     if (!vnd || isNaN(vnd)) {
       return ctx.reply(
-        "❌ Amount VND không hợp lệ (ví dụ: `100k vnd`, `2m vnd`, `500000 vnd`)."
+        "❌ Amount VND không hợp lệ (ví dụ: `100k vnd`, `2m vnd`, `1b vnd`, `500000 vnd`)."
       );
     }
-    usdValue = (vnd / prices.usdt.vnd) * prices.usdt.usd;
+    usdValue = vnd / prices.fxVndPerUsd;
     vndValue = vnd;
   } else {
-    const amount = parseFloat(amountStr);
+    const amount = parseFloat(amountStr.replace(/,/g, ""));
     if (isNaN(amount)) {
       return ctx.reply("❌ Amount không hợp lệ.");
     }
 
-    switch (coin) {
-      case "sol":
-        usdValue = amount * prices.sol.usd;
-        vndValue = amount * prices.sol.vnd;
-        break;
-      case "bnb":
-        usdValue = amount * prices.bnb.usd;
-        vndValue = amount * prices.bnb.vnd;
-        break;
-      case "usdt":
-      case "usd":
-        usdValue = amount;
-        vndValue = amount * (prices.usdt.vnd / prices.usdt.usd);
-        break;
-      default:
-        return ctx.reply(
-          "⚠ Coin chưa hỗ trợ.\n" +
-            "Hiện hỗ trợ: `sol`, `bnb`, `usd/usdt`, `vnd`"
-        );
+    // coin khác vnd → quy ra USD
+    if (!COIN_MAP[coin]) {
+      return ctx.reply(
+        "⚠ Coin chưa hỗ trợ.\n" +
+          "Hiện hỗ trợ: `sol`, `usdt`, `usd`, `bnb`, `btc`, `eth`, `ton`, `avax`, `doge`, `vnd`"
+      );
     }
+
+    usdValue = getUsdValueFromCoin(amount, coin, prices);
+    vndValue = usdValue * prices.fxVndPerUsd;
   }
 
-  const sol = usdValue / prices.sol.usd;
-  const bnb = usdValue / prices.bnb.usd;
-  const usdt = usdValue; // 1 USDT ~ 1 USD
+  // từ tổng USD value → suy ra SOL & USDT
+  const solPrice = prices.raw["solana"]?.usd;
+  if (!solPrice) {
+    throw new Error("Missing SOL price");
+  }
+
+  const solAmount = usdValue / solPrice;
+  const usdtAmount = usdValue; // 1 USDT ~ 1 USD
 
   return ctx.reply(
     `💰 *VALUE CHECK*\n\n` +
-      `🇻🇳 VND: *${vndValue.toLocaleString("vi-VN")}₫*\n` +
+      `🇻🇳 VND: *${Math.round(vndValue).toLocaleString("vi-VN")}₫*\n` +
       `💲 USD: *${usdValue.toFixed(2)}$*\n\n` +
-      `🪙 SOL: *${sol.toFixed(4)} SOL*\n` +
-      `🟡 BNB: *${bnb.toFixed(4)} BNB*\n` +
-      `💵 USDT: *${usdt.toFixed(2)} USDT*`,
+      `🪙 SOL: *${solAmount.toFixed(4)} SOL*\n` +
+      `💵 USDT: *${usdtAmount.toFixed(2)} USDT*`,
     { parse_mode: "Markdown" }
   );
 }
@@ -147,7 +199,10 @@ bot.start((ctx) => {
       "- `val 1 sol`\n" +
       "- `1 sol`\n" +
       "- `2m vnd`\n" +
-      "- `100 usdt`",
+      "- `1b vnd`\n" +
+      "- `100 usdt`\n" +
+      "- `0.01 btc`\n" +
+      "- `0.5 eth`",
     { parse_mode: "Markdown" }
   );
 });
@@ -182,8 +237,11 @@ bot.on("text", async (ctx) => {
   const lower = msg.toLowerCase();
 
   // match pattern "<amount> <coin>" hoặc "val <amount> <coin>"
-  const simplePattern = /^(\d+(\.\d+)?(k|m)?)\s+(sol|bnb|usdt|usd|vnd)\b/i;
-  const valPattern = /^val\s+(\d+(\.\d+)?(k|m)?)\s+(sol|bnb|usdt|usd|vnd)\b/i;
+  // amount: số, số.k/m/b, có thể có thập phân
+  const simplePattern =
+    /^(\d+(\.\d+)?(k|m|b)?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
+  const valPattern =
+    /^val\s+(\d+(\.\d+)?(k|m|b)?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
 
   if (simplePattern.test(lower) || valPattern.test(lower)) {
     try {
