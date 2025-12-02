@@ -38,9 +38,14 @@ const COIN_MAP = {
 // build ids string for API
 const COIN_IDS = Array.from(new Set(Object.values(COIN_MAP))).join(",");
 
+// ================== FX CONFIG (BINANCE) ==================
+// 👉 Tỉ giá chuẩn: 1 USDT ~ 27.500 VND (Binance bán ra)
+// Sau này Binance đổi, chỉ cần sửa con số này.
+const FX_VND_PER_USD = 27522;
+
 // ================== PRICE API + CACHE ==================
 
-const API_URL = `https://api.coingecko.com/api/v3/simple/price?ids=${COIN_IDS}&vs_currencies=usd,vnd`;
+const API_URL = `https://api.coingecko.com/api/v3/simple/price?ids=${COIN_IDS}&vs_currencies=usd`;
 
 let lastPrices = null;
 let lastFetchTs = 0;
@@ -59,16 +64,16 @@ async function getPrices(force = false) {
 
   const data = res.data;
 
-  if (!data.tether || !data.tether.usd || !data.tether.vnd) {
-    throw new Error("Missing tether price data from CoinGecko");
+  if (!data.tether || !data.tether.usd) {
+    throw new Error("Missing tether USD price data from CoinGecko");
   }
 
-  // tỷ giá VND / 1 USD (dựa trên USDT)
-  const fxVndPerUsd = data.tether.vnd / data.tether.usd;
+  // dùng tỉ giá cố định từ Binance
+  const fxVndPerUsd = FX_VND_PER_USD;
 
   lastPrices = {
-    raw: data,       // full data by id
-    fxVndPerUsd,     // global FX: VND per 1 USD
+    raw: data,      // full data by id (chỉ có usd)
+    fxVndPerUsd,   // VND per 1 USD (Binance)
   };
 
   lastFetchTs = now;
@@ -240,7 +245,7 @@ async function handleVal(ctx, rawInput) {
         "❌ Amount VND không hợp lệ (ví dụ: `100k vnd`, `2m vnd`, `1b vnd`, `1b2 vnd`, `100k+20k vnd`)."
       );
     }
-    usdValue = vnd / prices.fxVndPerUsd;
+    usdValue = vnd / prices.fxVndPerUsd; // dùng tỉ giá Binance
     vndValue = vnd;
   } else {
     const amount = evaluateExpression(amountExpr);
@@ -257,7 +262,7 @@ async function handleVal(ctx, rawInput) {
     }
 
     usdValue = getUsdValueFromCoin(amount, coin, prices);
-    vndValue = usdValue * prices.fxVndPerUsd;
+    vndValue = usdValue * prices.fxVndPerUsd; // dùng tỉ giá Binance
   }
 
   // từ tổng USD value → suy ra SOL & USDT
