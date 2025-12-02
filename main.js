@@ -1,4 +1,4 @@
-// main.js - Telegram Crypto Value Bot (CommonJS, auto-parse, cache, multi-coin, tỷ, no-BNB output)
+// main.js - Telegram Crypto Value Bot (CommonJS, auto-parse, cache, multi-coin, tỷ, smart format)
 
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
@@ -70,34 +70,35 @@ async function getPrices(force = false) {
 
 // ================== UTILS ==================
 
-// convert text như:
-// 100k  -> 100,000
-// 2m    -> 2,000,000
-// 1b    -> 1,000,000,000
-// 1m2   -> 1,200,000
-// 1b2   -> 1,200,000,000
-// 10k5  -> 10,500
-function parseVND(str) {
+// universal parser cho amount (áp dụng cho mọi coin & VND)
+// Hỗ trợ:
+//  - 100k  -> 100,000
+//  - 2m    -> 2,000,000
+//  - 1b    -> 1,000,000,000
+//  - 1k2   -> 1,200
+//  - 1m2   -> 1,200,000
+//  - 1b2   -> 1,200,000,000
+//  - 10k5  -> 10,500
+function parseAmount(str) {
   let s = str.toLowerCase().trim();
 
-  // pattern đặc biệt: <int><k|m|b><digit>, ví dụ: 1b2, 1m2, 10k5
+  // pattern: 1b2, 1m2, 10k5
   const compactMatch = s.match(/^(\d+)([kmb])(\d)$/);
   if (compactMatch) {
     const base = parseInt(compactMatch[1], 10);
     const suffix = compactMatch[2];
-    const extraDigit = parseInt(compactMatch[3], 10);
+    const extra = parseInt(compactMatch[3], 10);
 
-    let factor = 1;
-    if (suffix === "k") factor = 1_000;
-    if (suffix === "m") factor = 1_000_000;
-    if (suffix === "b") factor = 1_000_000_000;
+    let mult = 1;
+    if (suffix === "k") mult = 1_000;
+    if (suffix === "m") mult = 1_000_000;
+    if (suffix === "b") mult = 1_000_000_000;
 
-    return (base + extraDigit / 10) * factor; // ví dụ 1b2 => (1 + 0.2) * 1e9
+    return (base + extra / 10) * mult;
   }
 
-  // fallback: logic cũ
-  const numeric = s.replace(/[^0-9.]/g, "");
-  let num = parseFloat(numeric);
+  // normal: 100k, 5m, 2b, 1.5m ...
+  let num = parseFloat(s.replace(/[^0-9.]/g, ""));
   if (isNaN(num)) return NaN;
 
   if (s.includes("k")) num *= 1_000;
@@ -128,23 +129,28 @@ function getUsdValueFromCoin(amount, symbol, prices) {
   return amount * coinData.usd;
 }
 
-// format SOL smart: lớn thì 1 số sau dấu chấm, nhỏ thì giữ chi tiết hơn
+// format SOL smart:
+//  - >= 1    → 1 số sau dấu chấm (357.9012 -> 357.9)
+//  - >= 0.01 → 3 số sau dấu chấm
+//  - nhỏ hơn -> 6 số sau dấu chấm
 function formatSolAmount(solAmount) {
   if (solAmount >= 1) {
-    return solAmount.toFixed(1); // 357.9012 -> 357.9
+    return solAmount.toFixed(1);
   } else if (solAmount >= 0.01) {
-    return solAmount.toFixed(3); // 0.123456 -> 0.123
+    return solAmount.toFixed(3);
   } else {
-    return solAmount.toFixed(6); // rất nhỏ thì giữ 6 số
+    return solAmount.toFixed(6);
   }
 }
 
-// format USDT: lớn thì rút gọn + thousands, nhỏ thì để 2 số sau dấu chấm
+// format USDT:
+//  - >= 1000 → floor & format theo vi-VN (45490.73 -> "45.490")
+//  - < 1000  → 2 số sau dấu chấm (12.3456 -> "12.35")
 function formatUsdtAmount(usdtAmount) {
   if (usdtAmount >= 1000) {
-    return Math.round(usdtAmount).toLocaleString("vi-VN"); // 45490.73 -> "45.491"
+    return Math.floor(usdtAmount).toLocaleString("vi-VN");
   } else {
-    return usdtAmount.toFixed(2); // 12.3456 -> "12.35"
+    return usdtAmount.toFixed(2);
   }
 }
 
@@ -158,6 +164,7 @@ async function handleVal(ctx, rawInput) {
         "Ví dụ:\n" +
         "- `val 1 sol`\n" +
         "- `100 usdt`\n" +
+        "- `100k usdt`\n" +
         "- `500k vnd`\n" +
         "- `2m vnd`\n" +
         "- `1b2 vnd`\n" +
@@ -176,7 +183,7 @@ async function handleVal(ctx, rawInput) {
   const [amountStr, coin] = text.split(" ");
   if (!amountStr || !coin) {
     return ctx.reply(
-      "❌ Sai format. Ví dụ: `val 1 sol`, `100 usdt`, `2m vnd`, `1b2 vnd`, `0.01 btc`"
+      "❌ Sai format. Ví dụ: `val 1 sol`, `100 usdt`, `100k usdt`, `2m vnd`, `1b2 vnd`, `0.01 btc`"
     );
   }
 
@@ -187,7 +194,7 @@ async function handleVal(ctx, rawInput) {
 
   // Trường hợp input là VND
   if (coin === "vnd") {
-    const vnd = parseVND(amountStr);
+    const vnd = parseAmount(amountStr);
     if (!vnd || isNaN(vnd)) {
       return ctx.reply(
         "❌ Amount VND không hợp lệ (ví dụ: `100k vnd`, `2m vnd`, `1b vnd`, `1b2 vnd`, `500000 vnd`)."
@@ -196,7 +203,7 @@ async function handleVal(ctx, rawInput) {
     usdValue = vnd / prices.fxVndPerUsd;
     vndValue = vnd;
   } else {
-    const amount = parseFloat(amountStr.replace(/,/g, ""));
+    const amount = parseAmount(amountStr);
     if (isNaN(amount)) {
       return ctx.reply("❌ Amount không hợp lệ.");
     }
@@ -246,9 +253,9 @@ bot.start((ctx) => {
       "- `/val 1 sol`\n" +
       "- `val 1 sol`\n" +
       "- `1 sol`\n" +
+      "- `100k usdt`\n" +
       "- `2m vnd`\n" +
       "- `1b2 vnd`\n" +
-      "- `100 usdt`\n" +
       "- `0.01 btc`\n" +
       "- `0.5 eth`",
     { parse_mode: "Markdown" }
@@ -285,7 +292,7 @@ bot.on("text", async (ctx) => {
   const lower = msg.toLowerCase();
 
   // match pattern "<amount> <coin>" hoặc "val <amount> <coin>"
-  // amount: số, số.k/m/b, có thể có 1 số phía sau như 1b2, 1m2, 10k5
+  // amount: số, số.k/m/b, có thể có 1 digit phía sau như 1b2, 1m2, 10k5
   const simplePattern =
     /^(\d+(\.\d+)?(k|m|b)?\d?)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
   const valPattern =
