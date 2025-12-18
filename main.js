@@ -41,7 +41,7 @@ const COIN_IDS = Array.from(new Set(Object.values(COIN_MAP))).join(",");
 // ================== FX CONFIG (BINANCE) ==================
 // 👉 Tỉ giá chuẩn: 1 USDT ~ 27.500 VND (Binance bán ra)
 // Sau này Binance đổi, chỉ cần sửa con số này.
-const FX_VND_PER_USD = 27500;
+const FX_VND_PER_USD = 27058;
 
 // ================== PRICE API + CACHE ==================
 
@@ -390,3 +390,4 @@ bot.catch((err, ctx) => {
 
 bot.launch();
 console.log("🚀 Telegram Crypto Value Bot running...");
+
