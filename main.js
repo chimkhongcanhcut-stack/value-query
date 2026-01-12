@@ -11,7 +11,7 @@ const { Telegraf } = require("telegraf");
 const axios = require("axios");
 
 // 👉 THAY TOKEN BOT CỦA BẠN VÀO ĐÂY
-const BOT_TOKEN = "8421486324:AAFc0QpBWIuXvfVHfThZPIsE5d6rVq3a0j4";
+const BOT_TOKEN = "";
 
 if (!BOT_TOKEN || BOT_TOKEN === "YOUR_TELEGRAM_BOT_TOKEN") {
   console.error("❌ Chưa set BOT_TOKEN trong code!");
@@ -390,4 +390,5 @@ bot.catch((err, ctx) => {
 
 bot.launch();
 console.log("🚀 Telegram Crypto Value Bot running...");
+
 
