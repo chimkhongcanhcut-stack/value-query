@@ -40,7 +40,7 @@ const COIN_MAP = {
 const COIN_IDS = Array.from(new Set(Object.values(COIN_MAP))).join(",");
 
 // ================== FX CONFIG (BINANCE) ==================
-const FX_VND_PER_USD = 26558;
+const FX_VND_PER_USD = 27058;
 
 // ================== PRICE API + CACHE ==================
 
