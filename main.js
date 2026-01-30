@@ -1,17 +1,17 @@
-// main.js - Telegram Crypto Value Bot (AZ-style)
-// - Binance P2P SELL median (USDT/VND)
-// - CoinGecko prices
-// - Smart calculator (rounded)
-// - k/m/b + 1m2, 1b2
-// - SOL / USDT / BNB output
+// main.js - Telegram Crypto Value Bot (AZ-style + FIXED)
+// - Binance P2P SELL median (USDT/VND) => AZ-like rate
+// - CoinGecko prices (USD)
+// - Smart calculator output: 🖥 expr = ✅ result (rounded)
+// - k/m/b + 1m2, 1b2, 10k5
+// - value output: VND, USD, SOL, USDT, BNB
 
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
 
 // ================== BOT TOKEN ==================
-const BOT_TOKEN = "";
+const BOT_TOKEN = process.env.BOT_TOKEN || ""; // khuyến nghị set bằng env
 if (!BOT_TOKEN) {
-  console.error("❌ Chưa set BOT_TOKEN");
+  console.error("❌ Chưa set BOT_TOKEN (env BOT_TOKEN hoặc sửa trong file)!");
   process.exit(1);
 }
 
@@ -60,25 +60,28 @@ async function getUsdtVndSellMedian(force = false) {
       rows: 10,
       payTypes: [],
       asset: "USDT",
-      tradeType: "SELL",
+      tradeType: "SELL", // AZ-style
       fiat: "VND",
     },
-    { timeout: 5000 }
+    {
+      headers: { "content-type": "application/json" },
+      timeout: 5000,
+    }
   );
 
   const ads = res.data?.data || [];
   if (!ads.length) throw new Error("No P2P SELL ads");
 
   const prices = ads
-    .map((a) => Number(a.adv.price))
-    .filter(Boolean)
+    .map((a) => Number(a.adv?.price))
+    .filter((x) => Number.isFinite(x) && x > 0)
     .sort((a, b) => a - b);
+
+  if (!prices.length) throw new Error("No valid P2P prices");
 
   const mid = Math.floor(prices.length / 2);
   const median =
-    prices.length % 2
-      ? prices[mid]
-      : (prices[mid - 1] + prices[mid]) / 2;
+    prices.length % 2 ? prices[mid] : (prices[mid - 1] + prices[mid]) / 2;
 
   lastSellRate = median;
   lastSellTs = now;
@@ -99,7 +102,7 @@ async function getPrices(force = false) {
 
   lastPrices = {
     raw: cgRes.data,
-    fxVndPerUsd: sellRate,
+    fxVndPerUsd: sellRate, // 🔥 1 USDT ≈ fxVndPerUsd (AZ-like)
   };
 
   lastFetchTs = now;
@@ -108,106 +111,198 @@ async function getPrices(force = false) {
 
 // ================== UTILS ==================
 function parseAmount(str) {
-  let s = str.toLowerCase().trim();
+  let s = String(str).toLowerCase().trim();
 
+  // pattern: 1b2, 1m2, 10k5
   const compact = s.match(/^(\d+)([kmb])(\d)$/);
   if (compact) {
-    const base = +compact[1];
-    const extra = +compact[3] / 10;
-    const mult = compact[2] === "k" ? 1e3 : compact[2] === "m" ? 1e6 : 1e9;
-    return (base + extra) * mult;
+    const base = parseInt(compact[1], 10);
+    const suffix = compact[2];
+    const extra = parseInt(compact[3], 10);
+
+    let mult = 1;
+    if (suffix === "k") mult = 1_000;
+    if (suffix === "m") mult = 1_000_000;
+    if (suffix === "b") mult = 1_000_000_000;
+
+    return (base + extra / 10) * mult;
   }
 
+  // normal: 100k, 5m, 2b, 1.5m ...
   let num = parseFloat(s.replace(/[^0-9.]/g, ""));
   if (isNaN(num)) return NaN;
 
-  if (s.includes("k")) num *= 1e3;
-  if (s.includes("m")) num *= 1e6;
-  if (s.includes("b") || s.includes("ty") || s.includes("tỷ")) num *= 1e9;
+  if (s.includes("k")) num *= 1_000;
+  if (s.includes("m")) num *= 1_000_000;
+  if (s.includes("b") || s.includes("ty") || s.includes("tỷ")) num *= 1_000_000_000;
+
   return num;
 }
 
 function evaluateExpression(expr) {
-  let s = expr.toLowerCase().replace(/,/g, "").trim();
+  let s = String(expr).toLowerCase().replace(/,/g, "").trim();
   if (!s) return NaN;
 
-  s = s.replace(/(\d+(?:\.\d+)?(?:[kmb]\d?)?)/gi, (m) => {
-    const v = parseAmount(m);
-    return isNaN(v) ? "NaN" : String(v);
+  // replace number tokens with expanded numeric
+  s = s.replace(/(\d+(?:\.\d+)?(?:[kmb]\d?)?)/gi, (match) => {
+    const val = parseAmount(match);
+    return isNaN(val) ? "NaN" : String(val);
   });
 
+  // allow only safe chars
   if (!/^[0-9+\-*/().\s]+$/.test(s)) return NaN;
 
   try {
-    const r = Function(`"use strict";return (${s})`)();
-    return typeof r === "number" && isFinite(r) ? r : NaN;
+    const result = Function(`"use strict"; return (${s});`)();
+    if (typeof result !== "number" || !isFinite(result)) return NaN;
+    return result;
   } catch {
     return NaN;
   }
 }
 
+// rounding to kill 0.4400000000000013
 function roundSmart(num, decimals = 2) {
-  const f = 10 ** decimals;
-  return Math.round(num * f) / f;
+  if (!isFinite(num)) return NaN;
+  const factor = 10 ** decimals;
+  return Math.round(num * factor) / factor;
+}
+
+function formatNumberSmart(num) {
+  // show integer nicely, else keep up to 2 decimals (trim)
+  const r = roundSmart(num, 2);
+  if (Number.isNaN(r)) return "NaN";
+  if (Math.abs(r - Math.round(r)) < 1e-12) {
+    return Math.round(r).toLocaleString("vi-VN");
+  }
+  // trim trailing zeros
+  return String(r).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
 function getUsdValueFromCoin(amount, symbol, prices) {
-  if (symbol === "usd" || symbol === "usdt") return amount;
-  const id = COIN_MAP[symbol];
-  return amount * prices.raw[id].usd;
+  const sym = symbol.toLowerCase();
+  if (sym === "usd" || sym === "usdt") return amount;
+
+  const id = COIN_MAP[sym];
+  if (!id) throw new Error(`Unsupported coin: ${symbol}`);
+
+  const p = prices.raw[id]?.usd;
+  if (!p) throw new Error(`Missing USD price for ${symbol}`);
+
+  return amount * p;
 }
 
 // ================== CORE ==================
-async function handleVal(ctx, input) {
-  let text = input.trim().toLowerCase();
-  if (text.startsWith("val ")) text = text.slice(4);
+async function handleVal(ctx, rawInput) {
+  let text = String(rawInput || "").trim().toLowerCase();
+
+  // FIX: strip both "val " and "/val "
+  if (text.startsWith("/val")) {
+    text = text.replace(/^\/val\s*/i, "").trim();
+  }
+  if (text.startsWith("val ")) {
+    text = text.slice(4).trim();
+  }
+
+  if (!text) {
+    return ctx.reply(
+      "📌 Format:\n" +
+        "- `/val 1 sol`\n" +
+        "- `val 1 sol`\n" +
+        "- `1 sol`\n" +
+        "- `100k usdt`\n" +
+        "- `2m vnd`\n\n" +
+        "Calculator:\n" +
+        "- `11.8-11.36`\n" +
+        "- `100k+20k`\n",
+      { parse_mode: "Markdown" }
+    );
+  }
 
   const parts = text.split(/\s+/);
   const coin = parts.pop();
   const amountExpr = parts.join(" ");
 
-  if (!amountExpr || !coin) return;
+  if (!amountExpr || !coin) {
+    return ctx.reply("❌ Sai format. Ví dụ: `/val 1 sol`, `100k usdt`, `11.8-11.36`");
+  }
 
   const prices = await getPrices();
+
   let usdValue, vndValue;
+  const headerText = `${amountExpr} ${coin}`.trim();
 
   if (coin === "vnd") {
     const vnd = evaluateExpression(amountExpr);
+    if (!Number.isFinite(vnd)) {
+      return ctx.reply("❌ Amount VND không hợp lệ (vd: `100k vnd`, `2m vnd`, `1b2 vnd`).");
+    }
     usdValue = vnd / prices.fxVndPerUsd;
     vndValue = vnd;
   } else {
-    const amt = evaluateExpression(amountExpr);
-    usdValue = getUsdValueFromCoin(amt, coin, prices);
+    const amount = evaluateExpression(amountExpr);
+    if (!Number.isFinite(amount)) {
+      return ctx.reply("❌ Amount không hợp lệ.");
+    }
+    if (!COIN_MAP[coin]) {
+      return ctx.reply(
+        "⚠ Coin chưa hỗ trợ.\n" +
+          "Hỗ trợ: `sol`, `usdt`, `usd`, `bnb`, `btc`, `eth`, `ton`, `avax`, `doge`, `vnd`"
+      );
+    }
+    usdValue = getUsdValueFromCoin(amount, coin, prices);
     vndValue = usdValue * prices.fxVndPerUsd;
   }
 
-  const sol = usdValue / prices.raw.solana.usd;
-  const bnb = usdValue / prices.raw.binancecoin.usd;
+  const solPrice = prices.raw.solana?.usd;
+  const bnbPrice = prices.raw.binancecoin?.usd;
+  if (!solPrice || !bnbPrice) throw new Error("Missing SOL/BNB price");
 
-  ctx.reply(
-    `*${amountExpr} ${coin.toUpperCase()} =*\n\n` +
+  const solAmount = usdValue / solPrice;
+  const bnbAmount = usdValue / bnbPrice;
+
+  return ctx.reply(
+    `*${headerText.toUpperCase()} =*\n\n` +
       `🇻🇳 VND (AZ): *${Math.round(vndValue).toLocaleString("vi-VN")}₫*\n` +
-      `💲 USD: *${roundSmart(usdValue, 2)}$*\n\n` +
-      `🪙 SOL: *${roundSmart(sol, 4)}*\n` +
-      `💵 USDT: *${roundSmart(usdValue, 2)}*\n` +
-      `🟡 BNB: *${roundSmart(bnb, 5)}*\n\n` +
-      `📊 Rate: *1 USDT ≈ ${Math.round(prices.fxVndPerUsd).toLocaleString(
-        "vi-VN"
-      )}₫*`,
+      `💲 USD: *${formatNumberSmart(usdValue)}$*\n\n` +
+      `🪙 SOL: *${formatNumberSmart(solAmount)}*\n` +
+      `💵 USDT: *${formatNumberSmart(usdValue)}*\n` +
+      `🟡 BNB: *${formatNumberSmart(bnbAmount)}*\n\n` +
+      `📊 Rate: *1 USDT ≈ ${Math.round(prices.fxVndPerUsd).toLocaleString("vi-VN")}₫*`,
     { parse_mode: "Markdown" }
   );
 }
 
 // ================== TELEGRAM ==================
-bot.start((ctx) =>
+bot.start((ctx) => {
   ctx.reply(
-    "✅ Bot online\n" +
-      "`1 sol`\n`100k usdt`\n`2m vnd`\n`11.8-11.36`",
+    "✅ Bot online!\n\n" +
+      "Value:\n" +
+      "- `/val 1 sol`\n" +
+      "- `val 1 sol`\n" +
+      "- `1 sol`\n" +
+      "- `100k usdt`\n" +
+      "- `2m vnd`\n\n" +
+      "Calculator:\n" +
+      "- `11.8-11.36`\n" +
+      "- `100k+20k`\n",
     { parse_mode: "Markdown" }
-  )
-);
+  );
+});
 
-bot.command("val", (ctx) => handleVal(ctx, ctx.message.text));
+// ✅ FIXED /val handler (strip /val)
+bot.command("val", async (ctx) => {
+  const raw = ctx.message.text.replace(/^\/val\s*/i, "");
+  try {
+    await handleVal(ctx, raw);
+  } catch (err) {
+    console.error("❌ Error in /val:", err?.message || err);
+    if (err?.response?.status === 429) {
+      return ctx.reply("⚠ API đang bị rate limit (429). Đợi vài giây rồi thử lại nha.");
+    }
+    ctx.reply("❌ Có lỗi xảy ra, thử lại sau.");
+  }
+});
 
 bot.on("text", async (ctx) => {
   const msg = ctx.message.text.trim();
@@ -215,25 +310,36 @@ bot.on("text", async (ctx) => {
 
   if (msg.startsWith("/")) return;
 
-  // calculator
-  if (/^[0-9kmb+\-*/().\s]+$/i.test(lower) && /[+\-*/]/.test(lower)) {
-    const r = evaluateExpression(msg);
-    if (!isNaN(r)) {
-      return ctx.reply(`🖥 ${msg} = ✅ *${roundSmart(r, 2)}*`, {
-        parse_mode: "Markdown",
-      });
+  // 1) PURE CALCULATOR MODE
+  const calcPattern = /^[0-9kmb+\-*/().\s]+$/i;
+  if (calcPattern.test(lower) && /[+\-*/]/.test(lower)) {
+    const rawResult = evaluateExpression(msg);
+    if (!isNaN(rawResult)) {
+      const out = formatNumberSmart(rawResult);
+      return ctx.reply(`🖥 ${msg} = ✅ *${out}*`, { parse_mode: "Markdown" });
     }
   }
 
-  // value
-  if (
-    /^([\d.kmb+\-*/()]+)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)/i.test(
-      lower
-    )
-  ) {
-    await handleVal(ctx, msg);
+  // 2) VALUE MODE (auto parse)
+  const valuePattern =
+    /^([\d.kmb+\-*/()]+)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
+
+  if (valuePattern.test(lower) || lower.startsWith("val ")) {
+    try {
+      await handleVal(ctx, msg);
+    } catch (err) {
+      console.error("❌ Error in text:", err?.message || err);
+      if (err?.response?.status === 429) {
+        return ctx.reply("⚠ API đang bị rate limit (429). Đợi vài giây rồi thử lại nha.");
+      }
+      ctx.reply("❌ Có lỗi xảy ra, thử lại sau.");
+    }
   }
 });
 
+bot.catch((err, ctx) => {
+  console.error(`❌ Lỗi ngoài handler (${ctx.updateType}):`, err);
+});
+
 bot.launch();
-console.log("🚀 Bot running (AZ-style)");
+console.log("🚀 Telegram Crypto Value Bot running (AZ-style + FIXED)...");
