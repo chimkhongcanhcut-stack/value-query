@@ -1,17 +1,17 @@
-// main.js - Telegram Crypto Value Bot (AZ-style + FIXED + TON fallback)
+// main.js - Telegram Crypto Value Bot (AZ-style + FIXED + TON Binance fallback)
 // - Binance P2P SELL median (USDT/VND) => AZ-like rate
 // - CoinGecko prices (USD)
+// - TON hard fallback from Binance TONUSDT if CoinGecko misses TON
 // - Smart calculator output: 🖥 expr = ✅ result
 // - k/m/b + 1m2, 1b2, 10k5
 // - value output: VND, USD, SOL, USDT, BNB
-// - FIX: calculator no Markdown parse error with "*" symbol
-// - FIX: TON fallback IDs: toncoin + the-open-network
 
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
 
 // ================== BOT TOKEN ==================
-const BOT_TOKEN = process.env.BOT_TOKEN || ""; // khuyến nghị set bằng env
+const BOT_TOKEN = process.env.BOT_TOKEN || "";
+
 if (!BOT_TOKEN) {
   console.error("❌ Chưa set BOT_TOKEN (env BOT_TOKEN hoặc sửa trong file)!");
   process.exit(1);
@@ -20,7 +20,6 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 // ================== COIN CONFIG ==================
-// Dùng array để có fallback ID nếu CoinGecko đổi/không trả 1 ID
 const COIN_MAP = {
   sol: ["solana"],
   usdt: ["tether"],
@@ -64,7 +63,7 @@ async function getUsdtVndSellMedian(force = false) {
       rows: 10,
       payTypes: [],
       asset: "USDT",
-      tradeType: "SELL", // AZ-style
+      tradeType: "SELL",
       fiat: "VND",
     },
     {
@@ -93,6 +92,22 @@ async function getUsdtVndSellMedian(force = false) {
   return median;
 }
 
+// ================== BINANCE SPOT FALLBACK ==================
+async function getBinanceSpotPrice(symbol) {
+  const res = await axios.get(
+    `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
+    { timeout: 5000 }
+  );
+
+  const price = Number(res.data?.price);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error(`Invalid Binance price for ${symbol}`);
+  }
+
+  return price;
+}
+
 // ================== PRICE FETCH ==================
 async function getPrices(force = false) {
   const now = Date.now();
@@ -106,9 +121,30 @@ async function getPrices(force = false) {
     getUsdtVndSellMedian(),
   ]);
 
+  const raw = cgRes.data || {};
+
+  // ✅ HARD FIX TON:
+  // Nếu CoinGecko không trả TON thì lấy từ Binance TONUSDT.
+  const tonFromCg =
+    raw.toncoin?.usd ||
+    raw["the-open-network"]?.usd;
+
+  if (!tonFromCg) {
+    try {
+      const tonUsd = await getBinanceSpotPrice("TONUSDT");
+
+      raw.toncoin = { usd: tonUsd };
+      raw["the-open-network"] = { usd: tonUsd };
+
+      console.log(`✅ TON fallback from Binance: ${tonUsd}`);
+    } catch (err) {
+      console.error("⚠ Binance TON fallback failed:", err?.message || err);
+    }
+  }
+
   lastPrices = {
-    raw: cgRes.data,
-    fxVndPerUsd: sellRate, // 🔥 1 USDT ≈ fxVndPerUsd (AZ-like)
+    raw,
+    fxVndPerUsd: sellRate,
   };
 
   lastFetchTs = now;
@@ -122,12 +158,14 @@ function parseAmount(str) {
 
   // pattern: 1b2, 1m2, 10k5
   const compact = s.match(/^(\d+)([kmb])(\d)$/);
+
   if (compact) {
     const base = parseInt(compact[1], 10);
     const suffix = compact[2];
     const extra = parseInt(compact[3], 10);
 
     let mult = 1;
+
     if (suffix === "k") mult = 1_000;
     if (suffix === "m") mult = 1_000_000;
     if (suffix === "b") mult = 1_000_000_000;
@@ -137,6 +175,7 @@ function parseAmount(str) {
 
   // normal: 100k, 5m, 2b, 1.5m ...
   let num = parseFloat(s.replace(/[^0-9.]/g, ""));
+
   if (isNaN(num)) return NaN;
 
   if (s.includes("k")) num *= 1_000;
@@ -150,6 +189,7 @@ function parseAmount(str) {
 
 function evaluateExpression(expr) {
   let s = String(expr).toLowerCase().replace(/,/g, "").trim();
+
   if (!s) return NaN;
 
   // replace number tokens with expanded numeric
@@ -163,7 +203,11 @@ function evaluateExpression(expr) {
 
   try {
     const result = Function(`"use strict"; return (${s});`)();
-    if (typeof result !== "number" || !isFinite(result)) return NaN;
+
+    if (typeof result !== "number" || !isFinite(result)) {
+      return NaN;
+    }
+
     return result;
   } catch {
     return NaN;
@@ -173,12 +217,13 @@ function evaluateExpression(expr) {
 // rounding to kill 0.4400000000000013
 function roundSmart(num, decimals = 2) {
   if (!isFinite(num)) return NaN;
+
   const factor = 10 ** decimals;
   return Math.round(num * factor) / factor;
 }
 
 function formatNumberSmart(num) {
-  // show integer nicely, else keep up to 2 decimals (trim)
+  // show integer nicely, else keep up to 2 decimals
   const r = roundSmart(num, 2);
 
   if (Number.isNaN(r)) return "NaN";
@@ -187,21 +232,28 @@ function formatNumberSmart(num) {
     return Math.round(r).toLocaleString("vi-VN");
   }
 
-  // trim trailing zeros
   return String(r).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
 function getUsdPrice(symbol, prices) {
   const sym = symbol.toLowerCase();
 
-  if (sym === "usd" || sym === "usdt") return 1;
+  if (sym === "usd" || sym === "usdt") {
+    return 1;
+  }
 
   const ids = COIN_MAP[sym];
-  if (!ids) throw new Error(`Unsupported coin: ${symbol}`);
+
+  if (!ids) {
+    throw new Error(`Unsupported coin: ${symbol}`);
+  }
 
   for (const id of ids) {
     const p = prices.raw[id]?.usd;
-    if (p && Number.isFinite(p)) return p;
+
+    if (p && Number.isFinite(p)) {
+      return p;
+    }
   }
 
   throw new Error(`Missing USD price for ${symbol}`);
@@ -215,7 +267,7 @@ function getUsdValueFromCoin(amount, symbol, prices) {
 async function handleVal(ctx, rawInput) {
   let text = String(rawInput || "").trim().toLowerCase();
 
-  // FIX: strip both "val " and "/val "
+  // strip both "val " and "/val "
   if (text.startsWith("/val")) {
     text = text.replace(/^\/val\s*/i, "").trim();
   }
@@ -230,6 +282,7 @@ async function handleVal(ctx, rawInput) {
         "- `/val 1 sol`\n" +
         "- `val 1 sol`\n" +
         "- `1 sol`\n" +
+        "- `1 ton`\n" +
         "- `100k usdt`\n" +
         "- `2m vnd`\n\n" +
         "Calculator:\n" +
@@ -245,7 +298,7 @@ async function handleVal(ctx, rawInput) {
 
   if (!amountExpr || !coin) {
     return ctx.reply(
-      "❌ Sai format. Ví dụ: `/val 1 sol`, `100k usdt`, `11.8-11.36`",
+      "❌ Sai format. Ví dụ: `/val 1 sol`, `1 ton`, `100k usdt`, `11.8-11.36`",
       { parse_mode: "Markdown" }
     );
   }
@@ -317,6 +370,7 @@ bot.start((ctx) => {
       "- `/val 1 sol`\n" +
       "- `val 1 sol`\n" +
       "- `1 sol`\n" +
+      "- `1 ton`\n" +
       "- `100k usdt`\n" +
       "- `2m vnd`\n\n" +
       "Calculator:\n" +
@@ -326,7 +380,7 @@ bot.start((ctx) => {
   );
 });
 
-// ✅ FIXED /val handler (strip /val)
+// /val command
 bot.command("val", async (ctx) => {
   const raw = ctx.message.text.replace(/^\/val\s*/i, "");
 
@@ -363,7 +417,7 @@ bot.on("text", async (ctx) => {
     }
   }
 
-  // 2) VALUE MODE (auto parse)
+  // 2) VALUE MODE
   const valuePattern =
     /^([\d.kmb+\-*/()]+)\s+(sol|usdt|usd|vnd|bnb|btc|eth|ton|avax|doge)\b/i;
 
@@ -387,4 +441,4 @@ bot.catch((err, ctx) => {
 });
 
 bot.launch();
-console.log("🚀 Telegram Crypto Value Bot running (AZ-style + FIXED + TON fallback)...");
+console.log("🚀 Telegram Crypto Value Bot running (AZ-style + TON Binance fallback)...");
