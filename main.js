@@ -1,9 +1,11 @@
-// main.js - Telegram Crypto Value Bot (AZ-style + FIXED)
+// main.js - Telegram Crypto Value Bot (AZ-style + FIXED + TON fallback)
 // - Binance P2P SELL median (USDT/VND) => AZ-like rate
 // - CoinGecko prices (USD)
-// - Smart calculator output: 🖥 expr = ✅ result (rounded)
+// - Smart calculator output: 🖥 expr = ✅ result
 // - k/m/b + 1m2, 1b2, 10k5
 // - value output: VND, USD, SOL, USDT, BNB
+// - FIX: calculator no Markdown parse error with "*" symbol
+// - FIX: TON fallback IDs: toncoin + the-open-network
 
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
@@ -18,19 +20,20 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 // ================== COIN CONFIG ==================
+// Dùng array để có fallback ID nếu CoinGecko đổi/không trả 1 ID
 const COIN_MAP = {
-  sol: "solana",
-  usdt: "tether",
-  usd: "tether",
-  bnb: "binancecoin",
-  btc: "bitcoin",
-  eth: "ethereum",
-  ton: "toncoin",
-  avax: "avalanche-2",
-  doge: "dogecoin",
+  sol: ["solana"],
+  usdt: ["tether"],
+  usd: ["tether"],
+  bnb: ["binancecoin"],
+  btc: ["bitcoin"],
+  eth: ["ethereum"],
+  ton: ["toncoin", "the-open-network"],
+  avax: ["avalanche-2"],
+  doge: ["dogecoin"],
 };
 
-const COIN_IDS = [...new Set(Object.values(COIN_MAP))].join(",");
+const COIN_IDS = [...new Set(Object.values(COIN_MAP).flat())].join(",");
 
 // ================== COINGECKO ==================
 const API_URL = `https://api.coingecko.com/api/v3/simple/price?ids=${COIN_IDS}&vs_currencies=usd`;
@@ -49,6 +52,7 @@ const SELL_TTL_MS = 30000;
 
 async function getUsdtVndSellMedian(force = false) {
   const now = Date.now();
+
   if (!force && lastSellRate && now - lastSellTs < SELL_TTL_MS) {
     return lastSellRate;
   }
@@ -85,12 +89,14 @@ async function getUsdtVndSellMedian(force = false) {
 
   lastSellRate = median;
   lastSellTs = now;
+
   return median;
 }
 
 // ================== PRICE FETCH ==================
 async function getPrices(force = false) {
   const now = Date.now();
+
   if (!force && lastPrices && now - lastFetchTs < PRICE_TTL_MS) {
     return lastPrices;
   }
@@ -106,6 +112,7 @@ async function getPrices(force = false) {
   };
 
   lastFetchTs = now;
+
   return lastPrices;
 }
 
@@ -134,7 +141,9 @@ function parseAmount(str) {
 
   if (s.includes("k")) num *= 1_000;
   if (s.includes("m")) num *= 1_000_000;
-  if (s.includes("b") || s.includes("ty") || s.includes("tỷ")) num *= 1_000_000_000;
+  if (s.includes("b") || s.includes("ty") || s.includes("tỷ")) {
+    num *= 1_000_000_000;
+  }
 
   return num;
 }
@@ -171,25 +180,35 @@ function roundSmart(num, decimals = 2) {
 function formatNumberSmart(num) {
   // show integer nicely, else keep up to 2 decimals (trim)
   const r = roundSmart(num, 2);
+
   if (Number.isNaN(r)) return "NaN";
+
   if (Math.abs(r - Math.round(r)) < 1e-12) {
     return Math.round(r).toLocaleString("vi-VN");
   }
+
   // trim trailing zeros
   return String(r).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 
-function getUsdValueFromCoin(amount, symbol, prices) {
+function getUsdPrice(symbol, prices) {
   const sym = symbol.toLowerCase();
-  if (sym === "usd" || sym === "usdt") return amount;
 
-  const id = COIN_MAP[sym];
-  if (!id) throw new Error(`Unsupported coin: ${symbol}`);
+  if (sym === "usd" || sym === "usdt") return 1;
 
-  const p = prices.raw[id]?.usd;
-  if (!p) throw new Error(`Missing USD price for ${symbol}`);
+  const ids = COIN_MAP[sym];
+  if (!ids) throw new Error(`Unsupported coin: ${symbol}`);
 
-  return amount * p;
+  for (const id of ids) {
+    const p = prices.raw[id]?.usd;
+    if (p && Number.isFinite(p)) return p;
+  }
+
+  throw new Error(`Missing USD price for ${symbol}`);
+}
+
+function getUsdValueFromCoin(amount, symbol, prices) {
+  return amount * getUsdPrice(symbol, prices);
 }
 
 // ================== CORE ==================
@@ -200,6 +219,7 @@ async function handleVal(ctx, rawInput) {
   if (text.startsWith("/val")) {
     text = text.replace(/^\/val\s*/i, "").trim();
   }
+
   if (text.startsWith("val ")) {
     text = text.slice(4).trim();
   }
@@ -214,7 +234,7 @@ async function handleVal(ctx, rawInput) {
         "- `2m vnd`\n\n" +
         "Calculator:\n" +
         "- `11.8-11.36`\n" +
-        "- `100k+20k`\n",
+        "- `100k+20k`",
       { parse_mode: "Markdown" }
     );
   }
@@ -224,39 +244,55 @@ async function handleVal(ctx, rawInput) {
   const amountExpr = parts.join(" ");
 
   if (!amountExpr || !coin) {
-    return ctx.reply("❌ Sai format. Ví dụ: `/val 1 sol`, `100k usdt`, `11.8-11.36`");
+    return ctx.reply(
+      "❌ Sai format. Ví dụ: `/val 1 sol`, `100k usdt`, `11.8-11.36`",
+      { parse_mode: "Markdown" }
+    );
   }
 
   const prices = await getPrices();
 
-  let usdValue, vndValue;
+  let usdValue;
+  let vndValue;
   const headerText = `${amountExpr} ${coin}`.trim();
 
   if (coin === "vnd") {
     const vnd = evaluateExpression(amountExpr);
+
     if (!Number.isFinite(vnd)) {
-      return ctx.reply("❌ Amount VND không hợp lệ (vd: `100k vnd`, `2m vnd`, `1b2 vnd`).");
+      return ctx.reply(
+        "❌ Amount VND không hợp lệ (vd: `100k vnd`, `2m vnd`, `1b2 vnd`).",
+        { parse_mode: "Markdown" }
+      );
     }
+
     usdValue = vnd / prices.fxVndPerUsd;
     vndValue = vnd;
   } else {
     const amount = evaluateExpression(amountExpr);
+
     if (!Number.isFinite(amount)) {
       return ctx.reply("❌ Amount không hợp lệ.");
     }
+
     if (!COIN_MAP[coin]) {
       return ctx.reply(
         "⚠ Coin chưa hỗ trợ.\n" +
-          "Hỗ trợ: `sol`, `usdt`, `usd`, `bnb`, `btc`, `eth`, `ton`, `avax`, `doge`, `vnd`"
+          "Hỗ trợ: `sol`, `usdt`, `usd`, `bnb`, `btc`, `eth`, `ton`, `avax`, `doge`, `vnd`",
+        { parse_mode: "Markdown" }
       );
     }
+
     usdValue = getUsdValueFromCoin(amount, coin, prices);
     vndValue = usdValue * prices.fxVndPerUsd;
   }
 
-  const solPrice = prices.raw.solana?.usd;
-  const bnbPrice = prices.raw.binancecoin?.usd;
-  if (!solPrice || !bnbPrice) throw new Error("Missing SOL/BNB price");
+  const solPrice = getUsdPrice("sol", prices);
+  const bnbPrice = getUsdPrice("bnb", prices);
+
+  if (!solPrice || !bnbPrice) {
+    throw new Error("Missing SOL/BNB price");
+  }
 
   const solAmount = usdValue / solPrice;
   const bnbAmount = usdValue / bnbPrice;
@@ -285,7 +321,7 @@ bot.start((ctx) => {
       "- `2m vnd`\n\n" +
       "Calculator:\n" +
       "- `11.8-11.36`\n" +
-      "- `100k+20k`\n",
+      "- `100k+20k`",
     { parse_mode: "Markdown" }
   );
 });
@@ -293,13 +329,16 @@ bot.start((ctx) => {
 // ✅ FIXED /val handler (strip /val)
 bot.command("val", async (ctx) => {
   const raw = ctx.message.text.replace(/^\/val\s*/i, "");
+
   try {
     await handleVal(ctx, raw);
   } catch (err) {
     console.error("❌ Error in /val:", err?.message || err);
+
     if (err?.response?.status === 429) {
       return ctx.reply("⚠ API đang bị rate limit (429). Đợi vài giây rồi thử lại nha.");
     }
+
     ctx.reply("❌ Có lỗi xảy ra, thử lại sau.");
   }
 });
@@ -312,11 +351,15 @@ bot.on("text", async (ctx) => {
 
   // 1) PURE CALCULATOR MODE
   const calcPattern = /^[0-9kmb+\-*/().\s]+$/i;
+
   if (calcPattern.test(lower) && /[+\-*/]/.test(lower)) {
     const rawResult = evaluateExpression(msg);
+
     if (!isNaN(rawResult)) {
       const out = formatNumberSmart(rawResult);
-      return ctx.reply(`🖥 ${msg} = ✅ *${out}*`, { parse_mode: "Markdown" });
+
+      // FIX: no Markdown here, so "12*25" will not break Telegram parser
+      return ctx.reply(`🖥 ${msg} = ✅ ${out}`);
     }
   }
 
@@ -329,9 +372,11 @@ bot.on("text", async (ctx) => {
       await handleVal(ctx, msg);
     } catch (err) {
       console.error("❌ Error in text:", err?.message || err);
+
       if (err?.response?.status === 429) {
         return ctx.reply("⚠ API đang bị rate limit (429). Đợi vài giây rồi thử lại nha.");
       }
+
       ctx.reply("❌ Có lỗi xảy ra, thử lại sau.");
     }
   }
@@ -342,4 +387,4 @@ bot.catch((err, ctx) => {
 });
 
 bot.launch();
-console.log("🚀 Telegram Crypto Value Bot running (AZ-style + FIXED)...");
+console.log("🚀 Telegram Crypto Value Bot running (AZ-style + FIXED + TON fallback)...");
