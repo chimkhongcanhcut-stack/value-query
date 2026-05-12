@@ -1,10 +1,10 @@
-// main.js - Telegram Crypto Value Bot (AZ-style + FIXED + TON Binance fallback)
+// main.js - Telegram Crypto Value Bot (AZ-style + FIXED + TON Binance fallback + ETH output)
 // - Binance P2P SELL median (USDT/VND) => AZ-like rate
 // - CoinGecko prices (USD)
 // - TON hard fallback from Binance TONUSDT if CoinGecko misses TON
 // - Smart calculator output: 🖥 expr = ✅ result
 // - k/m/b + 1m2, 1b2, 10k5
-// - value output: VND, USD, SOL, USDT, BNB
+// - value output: VND, USD, SOL, ETH, USDT, BNB
 
 const { Telegraf } = require("telegraf");
 const axios = require("axios");
@@ -125,9 +125,7 @@ async function getPrices(force = false) {
 
   // ✅ HARD FIX TON:
   // Nếu CoinGecko không trả TON thì lấy từ Binance TONUSDT.
-  const tonFromCg =
-    raw.toncoin?.usd ||
-    raw["the-open-network"]?.usd;
+  const tonFromCg = raw.toncoin?.usd || raw["the-open-network"]?.usd;
 
   if (!tonFromCg) {
     try {
@@ -341,13 +339,15 @@ async function handleVal(ctx, rawInput) {
   }
 
   const solPrice = getUsdPrice("sol", prices);
+  const ethPrice = getUsdPrice("eth", prices);
   const bnbPrice = getUsdPrice("bnb", prices);
 
-  if (!solPrice || !bnbPrice) {
-    throw new Error("Missing SOL/BNB price");
+  if (!solPrice || !ethPrice || !bnbPrice) {
+    throw new Error("Missing SOL/ETH/BNB price");
   }
 
   const solAmount = usdValue / solPrice;
+  const ethAmount = usdValue / ethPrice;
   const bnbAmount = usdValue / bnbPrice;
 
   return ctx.reply(
@@ -355,6 +355,7 @@ async function handleVal(ctx, rawInput) {
       `🇻🇳 VND (AZ): *${Math.round(vndValue).toLocaleString("vi-VN")}₫*\n` +
       `💲 USD: *${formatNumberSmart(usdValue)}$*\n\n` +
       `🪙 SOL: *${formatNumberSmart(solAmount)}*\n` +
+      `🔷 ETH: *${formatNumberSmart(ethAmount)}*\n` +
       `💵 USDT: *${formatNumberSmart(usdValue)}*\n` +
       `🟡 BNB: *${formatNumberSmart(bnbAmount)}*\n\n` +
       `📊 Rate: *1 USDT ≈ ${Math.round(prices.fxVndPerUsd).toLocaleString("vi-VN")}₫*`,
@@ -370,6 +371,7 @@ bot.start((ctx) => {
       "- `/val 1 sol`\n" +
       "- `val 1 sol`\n" +
       "- `1 sol`\n" +
+      "- `1 eth`\n" +
       "- `1 ton`\n" +
       "- `100k usdt`\n" +
       "- `2m vnd`\n\n" +
@@ -441,4 +443,4 @@ bot.catch((err, ctx) => {
 });
 
 bot.launch();
-console.log("🚀 Telegram Crypto Value Bot running (AZ-style + TON Binance fallback)...");
+console.log("🚀 Telegram Crypto Value Bot running (AZ-style + TON Binance fallback + ETH output)...");
